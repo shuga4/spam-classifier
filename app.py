@@ -17,7 +17,7 @@ from googleapiclient.discovery import build
 st.set_page_config(page_title="SpamGuard Pro | Candy.Dev", page_icon="🛡️", layout="wide")
 
 # --- CREDENTIALS HELPERS ---
-CREDENTIALS_FILE = "credentials.json"
+CREDENTIALS_FILE = "users.json"
 
 def load_credentials() -> dict:
     """Load username/hashed-password map from credentials.json."""
@@ -57,7 +57,7 @@ if "username" not in st.session_state:
     st.session_state["username"] = ""
 
 if not st.session_state["logged_in"]:
-    st.markdown("<h1 style='text-align: center;'>Candy.Dev Security Portal 🔐</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>Security Portal 🔐</h1>", unsafe_allow_html=True)
     st.write("---")
 
     col1, col2, col3 = st.columns([1, 2, 1])
