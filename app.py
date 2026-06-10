@@ -57,7 +57,7 @@ if "username" not in st.session_state:
     st.session_state["username"] = ""
 
 if not st.session_state["logged_in"]:
-    st.markdown("<h1 style='text-align: center;'>Security Portal 🔐</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align: center;'>Candy.Dev Security Portal 🔐</h1>", unsafe_allow_html=True)
     st.write("---")
 
     col1, col2, col3 = st.columns([1, 2, 1])
@@ -94,19 +94,37 @@ model = train_model()
 # --- 3. GMAIL API INTEGRATION ---
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
+def get_credentials_from_secrets():
+    cfg = st.secrets["google_oauth"]
+    return {
+        "installed": {
+            "client_id":     cfg["client_id"],
+            "project_id":    cfg["project_id"],
+            "auth_uri":      cfg["auth_uri"],
+            "token_uri":     cfg["token_uri"],
+            "client_secret": cfg["client_secret"],
+            "redirect_uris": [cfg["redirect_uri"]],
+        }
+    }
+
 def fetch_live_gmails():
+    import json
     creds = None
-    if os.path.exists('token.json'):
-        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+
+    if "gmail_token" in st.session_state:
+        creds = Credentials.from_authorized_user_info(
+            json.loads(st.session_state["gmail_token"]), SCOPES
+        )
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            st.session_state["gmail_token"] = creds.to_json()
         else:
-            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            client_config = get_credentials_from_secrets()
+            flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=0)
-        with open('token.json', 'w') as token:
-            token.write(creds.to_json())
+            st.session_state["gmail_token"] = creds.to_json()
 
     service = build('gmail', 'v1', credentials=creds)
     results = service.users().messages().list(userId='me', labelIds=['INBOX'], maxResults=5).execute()
@@ -200,3 +218,4 @@ with tab2:
                 st.error("🚨 SPAM DETECTED")
             else:
                 st.success("✅ SAFE MESSAGE")
+
