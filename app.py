@@ -94,7 +94,7 @@ model = train_model()
 # --- 3. GMAIL API INTEGRATION ---
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
 
-def get_credentials_from_secrets():
+def get_client_config():
     cfg = st.secrets["google_oauth"]
     return {
         "installed": {
@@ -103,11 +103,12 @@ def get_credentials_from_secrets():
             "auth_uri":      cfg["auth_uri"],
             "token_uri":     cfg["token_uri"],
             "client_secret": cfg["client_secret"],
-            "redirect_uris": [cfg["redirect_uri"]],
+            "redirect_uris": ["http://localhost"],
         }
     }
 
-def fetch_live_gmails():
+def get_gmail_service():
+    """Return an authenticated Gmail service, or None if auth is still needed."""
     import json
     creds = None
 
@@ -116,28 +117,37 @@ def fetch_live_gmails():
             json.loads(st.session_state["gmail_token"]), SCOPES
         )
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            st.session_state["gmail_token"] = creds.to_json()
-        else:
-            client_config = get_credentials_from_secrets()
-            flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-            creds = flow.run_local_server(port=0)
-            st.session_state["gmail_token"] = creds.to_json()
+    # Refresh silently if expired
+    if creds and creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        st.session_state["gmail_token"] = creds.to_json()
 
-    service = build('gmail', 'v1', credentials=creds)
+    if creds and creds.valid:
+        return build('gmail', 'v1', credentials=creds)
+    return None
+
+def build_auth_flow():
+    flow = InstalledAppFlow.from_client_config(
+        get_client_config(), SCOPES,
+        redirect_uri="http://localhost"
+    )
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    return flow, auth_url
+
+def exchange_code_for_token(flow, code):
+    import json
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    st.session_state["gmail_token"] = creds.to_json()
+    return build('gmail', 'v1', credentials=creds)
+
+def scan_inbox(service):
     results = service.users().messages().list(userId='me', labelIds=['INBOX'], maxResults=5).execute()
     messages = results.get('messages', [])
-
     email_data = []
-    if not messages:
-        return email_data
-
     for msg in messages:
         txt = service.users().messages().get(userId='me', id=msg['id'], format='snippet').execute()
         email_data.append({"Snippet": txt['snippet'], "ID": msg['id']})
-
     return email_data
 
 # --- 4. SIDEBAR ---
@@ -182,31 +192,70 @@ with tab1:
     st.markdown("### OAuth 2.0 Gmail Integration")
     st.write("Securely fetch and scan the latest emails directly from your inbox using the Google API.")
 
-    if st.button("Connect to Gmail & Scan Inbox"):
-        try:
-            with st.spinner("Authenticating with Google and fetching live emails..."):
-                live_emails = fetch_live_gmails()
+    # Try to use existing token first
+    service = get_gmail_service()
 
-            if live_emails:
-                st.success(f"Successfully fetched {len(live_emails)} recent emails.")
-                for email in live_emails:
-                    snippet = email["Snippet"]
-                    prediction = model.predict([snippet])[0]
-                    confidence = max(model.predict_proba([snippet])[0]) * 100
+    if service:
+        # Already authenticated — show scan button
+        if st.button("🔄 Scan Inbox"):
+            with st.spinner("Fetching emails..."):
+                try:
+                    live_emails = scan_inbox(service)
+                    if live_emails:
+                        st.success(f"Successfully fetched {len(live_emails)} recent emails.")
+                        for email in live_emails:
+                            snippet = email["Snippet"]
+                            prediction = model.predict([snippet])[0]
+                            confidence = max(model.predict_proba([snippet])[0]) * 100
+                            with st.expander(f"Email ID: {email['ID']} | AI Status: {prediction.upper()}"):
+                                st.write(f"**Preview:** {snippet}")
+                                st.write(f"**Confidence:** {confidence:.2f}%")
+                                if prediction == 'spam':
+                                    st.error("🚨 AI flagged this email as Spam.")
+                                else:
+                                    st.success("✅ AI flagged this email as Safe.")
+                    else:
+                        st.info("Your inbox is empty.")
+                except Exception as e:
+                    st.error(f"API Error: {e}")
+        if st.button("🔓 Disconnect Gmail"):
+            del st.session_state["gmail_token"]
+            st.rerun()
+    else:
+        # Step 1 — show auth link
+        if "gmail_flow" not in st.session_state:
+            if st.button("Connect to Gmail & Scan Inbox"):
+                flow, auth_url = build_auth_flow()
+                st.session_state["gmail_flow_url"] = auth_url
+                # Store flow state needed to exchange code
+                st.session_state["gmail_flow_client_config"] = get_client_config()
+                st.rerun()
+        
+        if "gmail_flow_client_config" in st.session_state:
+            st.info("**Step 1:** Click the link below to authorize with Google:")
+            st.markdown(f"[👉 Click here to authorize with Google]({st.session_state['gmail_flow_url']})")
+            st.warning("After authorizing, Google will redirect to a page that may not load. **Copy the full URL from your browser address bar** and paste it below.")
 
-                    with st.expander(f"Email ID: {email['ID']} | AI Status: {prediction.upper()}"):
-                        st.write(f"**Preview:** {snippet}")
-                        st.write(f"**Confidence:** {confidence:.2f}%")
-                        if prediction == 'spam':
-                            st.error("🚨 AI flagged this email as Spam.")
-                        else:
-                            st.success("✅ AI flagged this email as Safe.")
-            else:
-                st.info("Your inbox is empty.")
-        except FileNotFoundError:
-            st.error("⚠️ **Missing credentials.json!** Download your OAuth credentials from the Google Cloud Console and place them in the project folder.")
-        except Exception as e:
-            st.error(f"API Error: {e}")
+            pasted_url = st.text_input("Paste the redirect URL here:")
+            if st.button("Submit & Connect"):
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(pasted_url)
+                    code = parse_qs(parsed.query).get("code", [None])[0]
+                    if not code:
+                        st.error("Could not find the authorization code in the URL. Please try again.")
+                    else:
+                        flow = InstalledAppFlow.from_client_config(
+                            st.session_state["gmail_flow_client_config"], SCOPES,
+                            redirect_uri="http://localhost"
+                        )
+                        service = exchange_code_for_token(flow, code)
+                        del st.session_state["gmail_flow_client_config"]
+                        del st.session_state["gmail_flow_url"]
+                        st.success("✅ Gmail connected! Click Scan Inbox to continue.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Authorization failed: {e}")
 
 with tab2:
     st.markdown("### Text Vector Analysis")
